@@ -1,0 +1,9 @@
+Repository,Dependency,EOL Date,Status
+"android-sample-app","androidx.appcompat:appcompat:1.2.0","Unknown","API Error"
+"android-sample-app","androidx.browser:browser:1.2.0","Unknown","API Error"
+"android-sample-app","com.rengwuxian.materialedittext:library:1.8.1","Unknown","API Error"
+"android-sample-app","androidx.legacy:legacy-support-v4:1.0.0","Unknown","API Error"
+"android-sample-app","com.getbase:floatingactionbutton:1.5.1","Unknown","API Error"
+"android-sample-app","com.google.android.gms:play-services-wallet:18.1.2","Unknown","API Error"
+"android-sample-app","io.card:android-sdk:5.3.2","Unknown","API Error"
+"android-sample-app","com.github.afollestad.material-dialogs:core:0.7.9.1@aar","Unknown","API Error"

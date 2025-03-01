@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="eolChecker.LibraryTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2025-03-01T11:05:46" hostname="regiss-MacBook-Pro.local" time="0.067">
+  <properties/>
+  <testcase name="someLibraryMethodReturnsTrue()" classname="eolChecker.LibraryTest" time="0.067"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
