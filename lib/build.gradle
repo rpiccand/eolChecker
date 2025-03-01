@@ -16,6 +16,8 @@ repositories {
     mavenCentral()
 }
 
+apply from: 'libraries.gradle'
+
 dependencies {
     // Use JUnit Jupiter for testing.
     testImplementation 'org.junit.jupiter:junit-jupiter:5.8.1'
@@ -27,7 +29,9 @@ dependencies {
     implementation 'com.google.guava:guava:30.1.1-jre'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.2'
     implementation 'org.slf4j:slf4j-api:2.0.7'
-    implementation 'org.slf4j:slf4j-simple:2.0.7'
+    implementation libraries.slf4j
+    implementation libraries.spring
+    
 }
 
 tasks.named('test') {
