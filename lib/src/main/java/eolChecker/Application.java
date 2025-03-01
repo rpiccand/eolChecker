@@ -1,34 +1,48 @@
 package eolChecker;
 
-import java.io.BufferedReader;
-import java.io.FileReader;
-import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class Application {
     private static final Logger logger = LoggerFactory.getLogger(Application.class);
-    
-    private static String githubRepo = "";
-    private static String githubToken = "";
 
     public static void main(String[] args) {
         Properties config = new Properties();
-
+        String githubRepo = "";
+        String githubToken = "";
+        String githubBranch = "main"; // Default branch to `main`
         String mappingFile = "mapping.conf";
         String apiBaseUrl = "https://endoflife.date/api/";
-        String csvFilePath = "eol_summary.csv"; // CSV File Path
+        String csvFilePath = "eol_summary.csv";
 
-        // Load config from classpath
-        loadConfig(config);
+        // Step 1: Load Configuration from properties file or CLI arguments
+        try (InputStream input = Application.class.getClassLoader().getResourceAsStream("config.properties")) {
+            if (input != null) {
+                config.load(input);
+            }
 
-        // Fetch Gradle files from GitHub (Single repo or all repos)
-        GitHubScanner githubScanner = new GitHubScanner(githubToken);
+            // Allow CLI arguments to override config properties
+            githubRepo = getConfigValue(args, config, "github.repo");
+            githubToken = getConfigValue(args, config, "github.token");
+            githubBranch = getConfigValue(args, config, "github.branch", "main"); // Default to main
+
+            if (githubRepo.isEmpty() || githubToken.isEmpty()) {
+                throw new Exception("Missing 'github.repo' or 'github.token'. Provide via config.properties or CLI.");
+            }
+
+            logger.info("Using GitHub Repository/Organization: {}", githubRepo);
+            logger.info("Using Target Branch: {}", githubBranch);
+        } catch (Exception e) {
+            logger.error("Error: {}", e.getMessage());
+            return;
+        }
+
+        // Step 2: Fetch Gradle files from GitHub (Single repo or all repos)
+        GitHubScanner githubScanner = new GitHubScanner(githubToken, githubBranch);
         Map<String, List<String>> repoGradleFiles = githubScanner.scanRepositories(githubRepo);
 
         if (repoGradleFiles.isEmpty()) {
@@ -36,20 +50,17 @@ public class Application {
             return;
         }
 
-        // Extract dependencies
+        // Step 3: Extract dependencies
         GradleParser parser = new GradleParser();
         EOLChecker eolChecker = new EOLChecker(apiBaseUrl);
         MappingManager mappingManager = new MappingManager();
         mappingManager.loadMappings(mappingFile);
-
-        int totalDependenciesChecked = 0;
 
         for (Map.Entry<String, List<String>> entry : repoGradleFiles.entrySet()) {
             String repoName = entry.getKey();
             List<String> gradleFiles = entry.getValue();
 
             List<Dependency> dependencies = parser.extractDependencies(gradleFiles);
-            totalDependenciesChecked += dependencies.size();
 
             for (Dependency dep : dependencies) {
                 String mappedProduct = mappingManager.getMappedProduct(dep.getGroup());
@@ -62,63 +73,40 @@ public class Application {
             }
         }
 
-        // Save Summary to CSV
+        // Step 4: Save Summary to CSV
         eolChecker.saveSummaryToCSV(csvFilePath);
 
-        // Print CSV content as a table
-        printCSV(csvFilePath, totalDependenciesChecked);
+        // Step 5: Print CSV content
+        printCSV(csvFilePath);
     }
 
-	private static void loadConfig(Properties config) {
-		try (InputStream input = Application.class.getClassLoader().getResourceAsStream("config.properties")) {
-            if (input == null) {
-                throw new Exception("config.properties not found in classpath.");
+    // Helper method to read configuration from CLI arguments or config file
+    private static String getConfigValue(String[] args, Properties config, String key) {
+        return getConfigValue(args, config, key, "");
+    }
+
+    private static String getConfigValue(String[] args, Properties config, String key, String defaultValue) {
+        for (String arg : args) {
+            if (arg.startsWith("--" + key + "=")) {
+                return arg.split("=", 2)[1].trim();
             }
-            config.load(input);
-
-            githubRepo = config.getProperty("github.repo", "").trim();
-            githubToken = config.getProperty("github.token", "").trim();
-
-            if (githubRepo.isEmpty() || githubToken.isEmpty()) {
-                throw new Exception("Missing 'github.repo' or 'github.token' in config.properties.");
-            }
-
-            logger.info("Using GitHub Repository/Organization: {}", githubRepo);
-        } catch (Exception e) {
-            logger.error("{}", e.getMessage());
-            return;
         }
-	}
+        return config.getProperty(key, defaultValue).trim();
+    }
 
-    // Method to print CSV content in a formatted table
-    private static void printCSV(String filePath, int totalDependenciesChecked) {
-        logger.info("\nEnd-of-Life Summary Report (CSV Output)\n");
+    // Method to print CSV content at the end
+    private static void printCSV(String filePath) {
+        logger.info("End-of-Life Summary Report (CSV Output):");
 
-        try (BufferedReader br = new BufferedReader(new FileReader(filePath))) {
+        try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(filePath))) {
             String line;
-            boolean isHeader = true;
-
             while ((line = br.readLine()) != null) {
-                if (isHeader) {
-                    logger.info("————————————————————————————————————————————————————————————————————————");
-                    logger.info("| Repository       | Group                  | Artifact     | Version  | Cycle | EOL Date  | Status    |");
-                    logger.info("————————————————————————————————————————————————————————————————————————");
-                    isHeader = false;
-                }
-
-                String[] columns = line.split(",");
-                if (columns.length >= 7) {
-                    logger.info("| {:<15} | {:<22} | {:<12} | {:<8} | {:<5} | {:<10} | {:<9} |",
-                            columns[0], columns[1], columns[2], columns[3], columns[4], columns[5], columns[6]);
-                }
+                logger.info(line);
             }
-            logger.info("————————————————————————————————————————————————————————————————————————");
-
-        } catch (IOException e) {
+        } catch (java.io.IOException e) {
             logger.error("Unable to read CSV file - {}", e.getMessage());
         }
 
-        logger.info("Total Dependencies Checked: {}", totalDependenciesChecked);
         logger.info("CSV Summary saved to: {}", filePath);
     }
 }

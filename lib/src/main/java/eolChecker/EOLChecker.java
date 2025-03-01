@@ -13,116 +13,133 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class EOLChecker {
-    private static final Logger logger = LoggerFactory.getLogger(EOLChecker.class);
+	private static final Logger logger = LoggerFactory.getLogger(EOLChecker.class);
 
-    private final String apiBaseUrl;
-    private final HttpClient httpClient;
-    private final ObjectMapper objectMapper;
-    private final List<EOLResult> results = new ArrayList<>();
+	private final String apiBaseUrl;
+	private final HttpClient httpClient;
+	private final ObjectMapper objectMapper;
+	private final List<EOLResult> results = new ArrayList<>();
 
-    public EOLChecker(String apiBaseUrl) {
-        this.apiBaseUrl = apiBaseUrl;
-        this.httpClient = HttpClient.newHttpClient();
-        this.objectMapper = new ObjectMapper();
-    }
+	public EOLChecker(String apiBaseUrl) {
+		this.apiBaseUrl = apiBaseUrl;
+		this.httpClient = HttpClient.newHttpClient();
+		this.objectMapper = new ObjectMapper();
+	}
 
-    public void checkEOL(String repoName, String product, Dependency dependency) {
-        String apiUrl = apiBaseUrl + product + ".json";
-        try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(new URI(apiUrl))
-                    .header("Accept", "application/json")
-                    .GET()
-                    .build();
+	public void checkEOL(String repoName, String product, Dependency dependency) {
+	    String apiUrl = apiBaseUrl + product + ".json";
+	    
+	    logger.debug("Calling API: {}", apiUrl);
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+	    try {
+	        HttpRequest request = HttpRequest.newBuilder()
+	                .uri(new URI(apiUrl))
+	                .header("Accept", "application/json")
+	                .GET()
+	                .build();
 
-            if (response.statusCode() != 200) {
-                logger.warn("API Error for product '{}'. Response code: {}", product, response.statusCode());
-                results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "API Error"));
-                return;
-            }
+	        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
-            JsonNode jsonResponse = objectMapper.readTree(response.body());
-            String majorVersion = extractMajorVersion(dependency.getVersion());
+	        if (response.statusCode() == 404) {
+	            logger.error("Product not found in API: {}", product);
+	            results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "Product Not Found"));
+	            return;
+	        }
 
-            JsonNode cycleEntry = findCycle(jsonResponse, majorVersion);
+	        if (response.statusCode() != 200) {
+	            results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "API Error"));
+	            logger.error("Failed to fetch EOL data for {}: HTTP {} - {}", product, response.statusCode(), response.body());
+	            return;
+	        }
 
-            if (cycleEntry == null) {
-                logger.warn("No matching cycle found for dependency: {}", dependency);
-                results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "No matching cycle"));
-                return;
-            }
+	        JsonNode jsonResponse = objectMapper.readTree(response.body());
+	        String majorVersion = extractMajorVersion(dependency.getVersion());
 
-            String eolDate = cycleEntry.has("eol") ? cycleEntry.get("eol").asText() : null;
+	        JsonNode cycleEntry = findCycle(jsonResponse, majorVersion);
 
-            if (eolDate == null || eolDate.equals("false")) {
-                logger.info("{} is supported (No EOL).", dependency);
-                results.add(new EOLResult(repoName, dependency.toString(), "No EOL", "Supported"));
-                return;
-            }
+	        if (cycleEntry == null) {
+	            results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "No matching cycle"));
+	            logger.warn("No matching cycle found for dependency: {}", dependency);
+	            return;
+	        }
 
-            LocalDate eol = LocalDate.parse(eolDate, DateTimeFormatter.ISO_LOCAL_DATE);
-            LocalDate today = LocalDate.now();
+	        String eolDate = cycleEntry.has("eol") ? cycleEntry.get("eol").asText() : null;
 
-            if (eol.isBefore(today)) {
-                logger.warn("{} has reached End of Life (EOL: {}).", dependency, eolDate);
-                results.add(new EOLResult(repoName, dependency.toString(), eolDate, "End of Life"));
-            } else {
-                logger.info("{} is approaching End of Life (EOL: {}).", dependency, eolDate);
-                results.add(new EOLResult(repoName, dependency.toString(), eolDate, "Approaching EOL"));
-            }
+	        if (eolDate == null || eolDate.equals("false")) {
+	            results.add(new EOLResult(repoName, dependency.toString(), "No EOL", "Supported"));
+	            return;
+	        }
 
-        } catch (Exception e) {
-            logger.error("ERROR checking EOL for {}: {}", dependency, e.getMessage());
-            results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "Error: " + e.getMessage()));
-        }
-    }
+	        LocalDate eol = LocalDate.parse(eolDate, DateTimeFormatter.ISO_LOCAL_DATE);
+	        LocalDate today = LocalDate.now();
 
-    private JsonNode findCycle(JsonNode jsonResponse, String majorVersion) {
-        for (JsonNode entry : jsonResponse) {
-            String cycle = entry.has("cycle") ? entry.get("cycle").asText() : "";
-            if (cycle.equals(majorVersion)) {
-                return entry;
-            }
-        }
-        return null;
-    }
+	        if (eol.isBefore(today)) {
+	            results.add(new EOLResult(repoName, dependency.toString(), eolDate, "End of Life"));
+	        } else {
+	            results.add(new EOLResult(repoName, dependency.toString(), eolDate, "Approaching EOL"));
+	        }
 
-    private String extractMajorVersion(String version) {
-        String[] parts = version.split("\\.");
-        return parts.length > 0 ? parts[0] : version;
-    }
+	    } catch (Exception e) {
+	        results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "Error: " + e.getMessage()));
+	        logger.error("Error fetching EOL data for {}: {}", product, e.getMessage());
+	    }
+	}
 
-    public void saveSummaryToCSV(String filePath) {
-        try (FileWriter writer = new FileWriter(filePath)) {
-            writer.append("Repository,Dependency,EOL Date,Status\n");
+	private JsonNode findCycle(JsonNode jsonResponse, String majorMinorVersion) {
+		logger.debug("Searching for cycle matching: {}", majorMinorVersion);
 
-            for (EOLResult result : results) {
-                writer.append(result.toCSVRow()).append("\n");
-            }
+		for (JsonNode entry : jsonResponse) {
+			String cycle = entry.has("cycle") ? entry.get("cycle").asText() : "";
 
-            logger.info("Summary saved to: {}", filePath);
-        } catch (IOException e) {
-            logger.error("ERROR: Failed to write CSV file - {}", e.getMessage());
-        }
-    }
+			logger.debug("Checking API cycle: {}", cycle);
 
-    private static class EOLResult {
-        String repoName;
-        String dependency;
-        String eolDate;
-        String status;
+			if (cycle.equals(majorMinorVersion)) {
+				logger.info("Matched cycle: {} for version {}", cycle, majorMinorVersion);
+				return entry;
+			}
+		}
 
-        public EOLResult(String repoName, String dependency, String eolDate, String status) {
-            this.repoName = repoName;
-            this.dependency = dependency;
-            this.eolDate = eolDate;
-            this.status = status;
-        }
+		logger.warn("No matching cycle found for version: {}", majorMinorVersion);
+		return null;
+	}
 
-        public String toCSVRow() {
-            return String.format("\"%s\",\"%s\",\"%s\",\"%s\"", repoName, dependency, eolDate, status);
-        }
-    }
+	private String extractMajorVersion(String version) {
+	    String[] parts = version.split("\\.");
+	    if (parts.length >= 2) {
+	        return parts[0] + "." + parts[1]; // Extracts "5.3" from "5.3.9"
+	    }
+	    return version;
+	}
+
+	public void saveSummaryToCSV(String filePath) {
+		try (FileWriter writer = new FileWriter(filePath)) {
+			writer.append("Repository,Dependency,EOL Date,Status\n");
+
+			for (EOLResult result : results) {
+				writer.append(result.toCSVRow()).append("\n");
+			}
+
+			logger.info("Summary saved to: {}", filePath);
+		} catch (IOException e) {
+			logger.error("ERROR: Failed to write CSV file - {}", e.getMessage());
+		}
+	}
+
+	private static class EOLResult {
+		String repoName;
+		String dependency;
+		String eolDate;
+		String status;
+
+		public EOLResult(String repoName, String dependency, String eolDate, String status) {
+			this.repoName = repoName;
+			this.dependency = dependency;
+			this.eolDate = eolDate;
+			this.status = status;
+		}
+
+		public String toCSVRow() {
+			return String.format("\"%s\",\"%s\",\"%s\",\"%s\"", repoName, dependency, eolDate, status);
+		}
+	}
 }

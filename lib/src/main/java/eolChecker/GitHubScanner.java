@@ -12,120 +12,187 @@ import java.net.http.HttpResponse;
 import java.util.*;
 
 /**
- * GitHubScanner fetches repositories and Gradle files from GitHub.
+ * GitHubScanner fetches Gradle files from a GitHub repository or organization.
  */
 public class GitHubScanner {
     private static final Logger logger = LoggerFactory.getLogger(GitHubScanner.class);
+
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final String githubToken;
+    private final String githubBranch;
 
-    public GitHubScanner(String githubToken) {
+    public GitHubScanner(String githubToken, String githubBranch) {
         this.httpClient = HttpClient.newHttpClient();
         this.objectMapper = new ObjectMapper();
         this.githubToken = githubToken;
+        this.githubBranch = githubBranch;
     }
 
     public Map<String, List<String>> scanRepositories(String githubRepo) {
-        GitHubRepository repository = GitHubRepository.fromUrl(githubRepo);
-        if (repository == null) {
-            logger.error("Invalid GitHub URL format. Must be 'https://github.com/user' or 'https://github.com/user/repo/'");
-            return Collections.emptyMap();
+        Map<String, List<String>> repoGradleFiles = new HashMap<>();
+        boolean isSingleRepo = isSingleRepository(githubRepo);
+
+        if (isSingleRepo) {
+            Repository repo = extractRepositoryDetails(githubRepo);
+            fetchGradleFilesFromRepository(repo, repoGradleFiles);
+        } else {
+            String owner = extractOwnerFromUrl(githubRepo);
+            fetchRepositoriesFromOrganization(owner, repoGradleFiles);
         }
 
-        return repository.isSingleRepo() ? scanSingleRepository(repository) : scanAllRepositories(repository);
+        return repoGradleFiles;
     }
 
-    private Map<String, List<String>> scanSingleRepository(GitHubRepository repo) {
-        Map<String, List<String>> repoGradleFiles = new HashMap<>();
-        logger.info("Scanning single repository: {}/{}", repo.getOwner(), repo.getName());
+    private boolean isSingleRepository(String githubRepo) {
+        return githubRepo.split("/").length >= 5;
+    }
 
-        String repoContentsUrl = repo.getApiContentsUrl();
+    private Repository extractRepositoryDetails(String githubRepo) {
+        String[] parts = githubRepo.replace("https://github.com/", "").split("/");
+        return new Repository(parts[0], parts[1], githubBranch);
+    }
+
+    private String extractOwnerFromUrl(String githubRepo) {
+        return githubRepo.replace("https://github.com/", "").split("/")[0];
+    }
+
+    private void fetchGradleFilesFromRepository(Repository repo, Map<String, List<String>> repoGradleFiles) {
+        String repoContentsUrl = repo.getContentsUrl();
+        logger.info("Fetching Gradle files from: {}", repoContentsUrl);
         List<String> gradleFiles = findGradleFilesRecursively(repoContentsUrl);
+
         if (!gradleFiles.isEmpty()) {
             repoGradleFiles.put(repo.getName(), gradleFiles);
         } else {
             logger.warn("No Gradle files found in repository: {}", repo.getName());
         }
-        return repoGradleFiles;
     }
 
-    private Map<String, List<String>> scanAllRepositories(GitHubRepository repo) {
-        Map<String, List<String>> repoGradleFiles = new HashMap<>();
-        logger.info("Scanning all repositories for organization/user: {}", repo.getOwner());
+    private void fetchRepositoriesFromOrganization(String owner, Map<String, List<String>> repoGradleFiles) {
+        String apiUrl = "https://api.github.com/users/" + owner + "/repos";
+        logger.info("Fetching repositories from: {}", apiUrl);
 
-        String apiUrl = repo.getApiReposUrl();
-        JsonNode repositories = fetchJsonFromGitHub(apiUrl);
-        if (repositories == null || !repositories.isArray()) {
-            logger.error("Failed to fetch repositories.");
-            return repoGradleFiles;
-        }
-
-        for (JsonNode repoNode : repositories) {
-            String repoName = repoNode.get("name").asText();
-            String repoContentsUrl = repo.getApiContentsUrl(repoName);
-
-            List<String> gradleFiles = findGradleFilesRecursively(repoContentsUrl);
-            if (!gradleFiles.isEmpty()) {
-                repoGradleFiles.put(repoName, gradleFiles);
+        try {
+            HttpResponse<String> response = sendGitHubRequest(apiUrl);
+            if (response.statusCode() != 200) {
+                logger.error("Failed to fetch repositories - {}", response.body());
+                return;
             }
+
+            JsonNode jsonResponse = objectMapper.readTree(response.body());
+            for (JsonNode repoNode : jsonResponse) {
+                String repoName = repoNode.get("name").asText();
+                Repository repo = new Repository(owner, repoName, githubBranch);
+                fetchGradleFilesFromRepository(repo, repoGradleFiles);
+            }
+        } catch (Exception e) {
+            logger.error("Error fetching repositories: {}", e.getMessage());
         }
-        return repoGradleFiles;
     }
 
     private List<String> findGradleFilesRecursively(String repoContentsUrl) {
         List<String> gradleFiles = new ArrayList<>();
-        JsonNode directoryContents = fetchJsonFromGitHub(repoContentsUrl);
+        int maxRetries = 5;
+        int retryCount = 0;
 
-        if (directoryContents == null || !directoryContents.isArray()) {
-            logger.error("Unexpected API response format for {}", repoContentsUrl);
-            return gradleFiles;
+        while (retryCount < maxRetries) {
+            try {
+                HttpResponse<String> response = sendGitHubRequest(repoContentsUrl);
+                if (response.statusCode() != 200) {
+                    handleGitHubError(repoContentsUrl, response, retryCount, maxRetries);
+                    return gradleFiles;
+                }
+
+                JsonNode jsonResponse = objectMapper.readTree(response.body());
+                if (!jsonResponse.isArray()) {
+                    logger.error("Unexpected API response format for {}", repoContentsUrl);
+                    return gradleFiles;
+                }
+
+                processGitHubDirectory(jsonResponse, gradleFiles);
+                return gradleFiles;
+            } catch (Exception e) {
+                logger.error("Exception while scanning {} - {}", repoContentsUrl, e.getMessage());
+                retryCount = handleStreamError(retryCount, maxRetries);
+            }
         }
 
-        for (JsonNode fileNode : directoryContents) {
-            processFileNode(fileNode, gradleFiles);
-        }
         return gradleFiles;
     }
 
-    private void processFileNode(JsonNode fileNode, List<String> gradleFiles) {
-        String fileType = fileNode.get("type").asText();
-        String filePath = fileNode.get("path").asText();
-        String downloadUrl = fileNode.get("download_url").asText(null);
+    private void processGitHubDirectory(JsonNode jsonResponse, List<String> gradleFiles) {
+        for (JsonNode fileNode : jsonResponse) {
+            String fileType = fileNode.get("type").asText();
+            String filePath = fileNode.get("path").asText();
+            String downloadUrl = fileNode.get("download_url").asText(null);
+            String subdirUrl = fileNode.get("url").asText();
 
-        if ("file".equals(fileType) && (filePath.endsWith("build.gradle") || filePath.endsWith("libraries.gradle"))) {
-            gradleFiles.add(downloadUrl);
-            logger.info("Found Gradle file: {}", downloadUrl);
-        } else if ("dir".equals(fileType)) {
-            String subdirContentsUrl = fileNode.get("url").asText();
-            gradleFiles.addAll(findGradleFilesRecursively(subdirContentsUrl));
+            if ("file".equals(fileType) && isGradleFile(filePath)) {
+                gradleFiles.add(downloadUrl);
+                logger.info("Found Gradle file: {}", downloadUrl);
+            }
+
+            if ("dir".equals(fileType)) {
+                gradleFiles.addAll(findGradleFilesRecursively(subdirUrl));
+            }
         }
     }
 
-    private JsonNode fetchJsonFromGitHub(String url) {
-        HttpRequest request = buildGitHubRequest(url);
-        try {
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200) {
-                logger.error("GitHub API error: {} - {}", url, response.body());
-                return null;
-            }
-            return objectMapper.readTree(response.body());
-        } catch (Exception e) {
-            logger.error("Exception while fetching {}: {}", url, e.getMessage());
-            return null;
+    private boolean isGradleFile(String filePath) {
+        return filePath.endsWith("build.gradle") || filePath.endsWith("libraries.gradle");
+    }
+
+    private void handleGitHubError(String url, HttpResponse<String> response, int retryCount, int maxRetries) {
+        logger.error("Failed to fetch directory contents for {} - Response: {}", url, response.body());
+        if (response.statusCode() == 429 || response.statusCode() == 503) {
+            retryCount = handleStreamError(retryCount, maxRetries);
         }
+    }
+
+    private int handleStreamError(int retryCount, int maxRetries) {
+        if (retryCount < maxRetries) {
+            retryCount++;
+            logger.warn("Retrying due to stream error... ({}/{})", retryCount, maxRetries);
+            try {
+                Thread.sleep(2000 * retryCount);
+            } catch (InterruptedException ignored) {}
+        }
+        return retryCount;
+    }
+
+    private HttpResponse<String> sendGitHubRequest(String url) throws Exception {
+        HttpRequest request = buildGitHubRequest(url);
+        return httpClient.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
     private HttpRequest buildGitHubRequest(String url) {
-        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+        return HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("Accept", "application/vnd.github.v3+json")
-                .header("User-Agent", "Java-Gradle-Scanner");
+                .header("User-Agent", "Java-Gradle-Scanner")
+                .header("Authorization", "Bearer " + githubToken)
+                .GET()
+                .build();
+    }
 
-        if (githubToken != null && !githubToken.isEmpty()) {
-            requestBuilder.header("Authorization", "Bearer " + githubToken);
+    private static class Repository {
+        private final String owner;
+        private final String name;
+        private final String branch;
+
+        public Repository(String owner, String name, String branch) {
+            this.owner = owner;
+            this.name = name;
+            this.branch = branch;
         }
-        return requestBuilder.GET().build();
+
+        public String getName() {
+            return name;
+        }
+
+        public String getContentsUrl() {
+            return "https://api.github.com/repos/" + owner + "/" + name + "/contents?ref=" + branch;
+        }
     }
 }
