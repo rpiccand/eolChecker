@@ -9,8 +9,12 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class EOLChecker {
+    private static final Logger logger = LoggerFactory.getLogger(EOLChecker.class);
+
     private final String apiBaseUrl;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
@@ -34,6 +38,7 @@ public class EOLChecker {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
             if (response.statusCode() != 200) {
+                logger.warn("API Error for product '{}'. Response code: {}", product, response.statusCode());
                 results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "API Error"));
                 return;
             }
@@ -44,6 +49,7 @@ public class EOLChecker {
             JsonNode cycleEntry = findCycle(jsonResponse, majorVersion);
 
             if (cycleEntry == null) {
+                logger.warn("No matching cycle found for dependency: {}", dependency);
                 results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "No matching cycle"));
                 return;
             }
@@ -51,6 +57,7 @@ public class EOLChecker {
             String eolDate = cycleEntry.has("eol") ? cycleEntry.get("eol").asText() : null;
 
             if (eolDate == null || eolDate.equals("false")) {
+                logger.info("{} is supported (No EOL).", dependency);
                 results.add(new EOLResult(repoName, dependency.toString(), "No EOL", "Supported"));
                 return;
             }
@@ -59,12 +66,15 @@ public class EOLChecker {
             LocalDate today = LocalDate.now();
 
             if (eol.isBefore(today)) {
+                logger.warn("{} has reached End of Life (EOL: {}).", dependency, eolDate);
                 results.add(new EOLResult(repoName, dependency.toString(), eolDate, "End of Life"));
             } else {
+                logger.info("{} is approaching End of Life (EOL: {}).", dependency, eolDate);
                 results.add(new EOLResult(repoName, dependency.toString(), eolDate, "Approaching EOL"));
             }
 
         } catch (Exception e) {
+            logger.error("ERROR checking EOL for {}: {}", dependency, e.getMessage());
             results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "Error: " + e.getMessage()));
         }
     }
@@ -92,9 +102,9 @@ public class EOLChecker {
                 writer.append(result.toCSVRow()).append("\n");
             }
 
-            System.out.println("✅ Summary saved to: " + filePath);
+            logger.info("Summary saved to: {}", filePath);
         } catch (IOException e) {
-            System.err.println("❌ ERROR: Failed to write CSV file - " + e.getMessage());
+            logger.error("ERROR: Failed to write CSV file - {}", e.getMessage());
         }
     }
 

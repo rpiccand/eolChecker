@@ -1,10 +1,15 @@
 package eolChecker;
+
 import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class MappingManager {
+    private static final Logger logger = LoggerFactory.getLogger(MappingManager.class);
+    
     private final Map<String, String> mappings = new HashMap<>();
 
     public void loadMappings(String mappingFileName) {
@@ -12,7 +17,7 @@ public class MappingManager {
 
         try (InputStream input = getClass().getClassLoader().getResourceAsStream(mappingFileName)) {
             if (input == null) {
-                System.err.println("⚠️ WARNING: Mapping file '" + mappingFileName + "' not found in classpath! Skipping mappings.");
+                logger.warn("WARNING: Mapping file '{}' not found in classpath! Skipping mappings.", mappingFileName);
                 return;
             }
 
@@ -23,9 +28,9 @@ public class MappingManager {
                 mappings.put(key.trim(), value);
             }
 
-            System.out.println("✅ Loaded " + mappings.size() + " mappings from " + mappingFileName);
+            logger.info("Loaded {} mappings from '{}'", mappings.size(), mappingFileName);
         } catch (Exception e) {
-            System.err.println("❌ ERROR: Failed to load mapping file '" + mappingFileName + "': " + e.getMessage());
+            logger.error("ERROR: Failed to load mapping file '{}': {}", mappingFileName, e.getMessage());
         }
     }
 
