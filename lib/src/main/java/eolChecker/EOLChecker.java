@@ -27,88 +27,81 @@ public class EOLChecker {
 	}
 
 	public void checkEOL(String repoName, String product, Dependency dependency) {
-	    String apiUrl = apiBaseUrl + product + ".json";
-	    
-	    logger.debug("Calling API: {}", apiUrl);
+		String apiUrl = apiBaseUrl + product + ".json";
 
-	    try {
-	        HttpRequest request = HttpRequest.newBuilder()
-	                .uri(new URI(apiUrl))
-	                .header("Accept", "application/json")
-	                .GET()
-	                .build();
+		logger.debug("Fetching EOL data from API: {}", apiUrl); // Log actual API call
 
-	        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+		try {
+			HttpRequest request = HttpRequest.newBuilder().uri(new URI(apiUrl)).header("Accept", "application/json")
+					.GET().build();
 
-	        if (response.statusCode() == 404) {
-	            logger.error("Product not found in API: {}", product);
-	            results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "Product Not Found"));
-	            return;
-	        }
+			HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
-	        if (response.statusCode() != 200) {
-	            results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "API Error"));
-	            logger.error("Failed to fetch EOL data for {}: HTTP {} - {}", product, response.statusCode(), response.body());
-	            return;
-	        }
+			if (response.statusCode() != 200) {
+				results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "API Error"));
+				return;
+			}
 
-	        JsonNode jsonResponse = objectMapper.readTree(response.body());
-	        String majorVersion = extractMajorVersion(dependency.getVersion());
+			JsonNode jsonResponse = objectMapper.readTree(response.body());
 
-	        JsonNode cycleEntry = findCycle(jsonResponse, majorVersion);
+			// Extract major/minor version based on API response format
+			String extractedVersion = extractMajorVersion(dependency.getVersion(), jsonResponse);
+			logger.debug("Extracted Version: {} for dependency {}", extractedVersion, dependency);
 
-	        if (cycleEntry == null) {
-	            results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "No matching cycle"));
-	            logger.warn("No matching cycle found for dependency: {}", dependency);
-	            return;
-	        }
+			// Find matching cycle in the API response
+			JsonNode cycleEntry = findCycle(jsonResponse, extractedVersion);
 
-	        String eolDate = cycleEntry.has("eol") ? cycleEntry.get("eol").asText() : null;
+			if (cycleEntry == null) {
+				results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "No matching cycle"));
+				return;
+			}
 
-	        if (eolDate == null || eolDate.equals("false")) {
-	            results.add(new EOLResult(repoName, dependency.toString(), "No EOL", "Supported"));
-	            return;
-	        }
+			String eolDate = cycleEntry.has("eol") ? cycleEntry.get("eol").asText() : null;
 
-	        LocalDate eol = LocalDate.parse(eolDate, DateTimeFormatter.ISO_LOCAL_DATE);
-	        LocalDate today = LocalDate.now();
+			if (eolDate == null || eolDate.equals("false")) {
+				results.add(new EOLResult(repoName, dependency.toString(), "No EOL", "Supported"));
+				return;
+			}
 
-	        if (eol.isBefore(today)) {
-	            results.add(new EOLResult(repoName, dependency.toString(), eolDate, "End of Life"));
-	        } else {
-	            results.add(new EOLResult(repoName, dependency.toString(), eolDate, "Approaching EOL"));
-	        }
+			LocalDate eol = LocalDate.parse(eolDate, DateTimeFormatter.ISO_LOCAL_DATE);
+			LocalDate today = LocalDate.now();
 
-	    } catch (Exception e) {
-	        results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "Error: " + e.getMessage()));
-	        logger.error("Error fetching EOL data for {}: {}", product, e.getMessage());
-	    }
+			if (eol.isBefore(today)) {
+				results.add(new EOLResult(repoName, dependency.toString(), eolDate, "End of Life"));
+			} else {
+				results.add(new EOLResult(repoName, dependency.toString(), eolDate, "Approaching EOL"));
+			}
+
+		} catch (Exception e) {
+			results.add(new EOLResult(repoName, dependency.toString(), "Unknown", "Error: " + e.getMessage()));
+		}
 	}
 
-	private JsonNode findCycle(JsonNode jsonResponse, String majorMinorVersion) {
-		logger.debug("Searching for cycle matching: {}", majorMinorVersion);
-
+	private JsonNode findCycle(JsonNode jsonResponse, String extractedVersion) {
 		for (JsonNode entry : jsonResponse) {
 			String cycle = entry.has("cycle") ? entry.get("cycle").asText() : "";
 
-			logger.debug("Checking API cycle: {}", cycle);
-
-			if (cycle.equals(majorMinorVersion)) {
-				logger.info("Matched cycle: {} for version {}", cycle, majorMinorVersion);
+			// Compare extracted major.minor or major version against API cycles
+			if (cycle.equals(extractedVersion)) {
 				return entry;
 			}
 		}
-
-		logger.warn("No matching cycle found for version: {}", majorMinorVersion);
 		return null;
 	}
 
-	private String extractMajorVersion(String version) {
-	    String[] parts = version.split("\\.");
-	    if (parts.length >= 2) {
-	        return parts[0] + "." + parts[1]; // Extracts "5.3" from "5.3.9"
-	    }
-	    return version;
+	private String extractMajorVersion(String version, JsonNode jsonResponse) {
+		String[] parts = version.split("\\.");
+
+		// Identify if the API contains major.minor or just major
+		boolean containsMinorVersions = jsonResponse.has(0) && jsonResponse.get(0).get("cycle").asText().contains(".");
+
+		// If API contains minor versions (e.g., Spring "5.3"), return "major.minor",
+		// otherwise just "major"
+		if (containsMinorVersions && parts.length >= 2) {
+			return parts[0] + "." + parts[1];
+		} else {
+			return parts[0]; // Default to major version if API cycles don't use minor versions
+		}
 	}
 
 	public void saveSummaryToCSV(String filePath) {

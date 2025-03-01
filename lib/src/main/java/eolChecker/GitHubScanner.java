@@ -31,17 +31,88 @@ public class GitHubScanner {
 
     public Map<String, List<String>> scanRepositories(String githubRepo) {
         Map<String, List<String>> repoGradleFiles = new HashMap<>();
-        boolean isSingleRepo = isSingleRepository(githubRepo);
+        boolean isSingleRepo = false;
+        githubRepo = githubRepo.trim();
 
-        if (isSingleRepo) {
-            Repository repo = extractRepositoryDetails(githubRepo);
-            fetchGradleFilesFromRepository(repo, repoGradleFiles);
+        if (githubRepo.startsWith("https://github.com/")) {
+            String[] parts = githubRepo.replace("https://github.com/", "").split("/");
+            if (parts.length == 1) {
+                logger.info("Scanning all repositories for org/user: {}", parts[0]);
+            } else if (parts.length >= 2) {
+                logger.info("Scanning only repository: {}/{}", parts[0], parts[1]);
+                isSingleRepo = true;
+            }
         } else {
-            String owner = extractOwnerFromUrl(githubRepo);
-            fetchRepositoriesFromOrganization(owner, repoGradleFiles);
+            logger.error("Invalid GitHub URL format in github.repo.");
+            return repoGradleFiles;
+        }
+
+        try {
+            if (isSingleRepo) {
+                String repoOwner = githubRepo.split("/")[3];
+                String repoName = githubRepo.split("/")[4];
+                String branch = fetchDefaultBranch(repoOwner, repoName);
+
+                Repository repo = new Repository(repoOwner, repoName, branch);
+                logger.info("Using branch: {}", branch);
+                
+                List<String> gradleFiles = findGradleFilesRecursively(repo.getContentsUrl());
+                if (!gradleFiles.isEmpty()) {
+                    repoGradleFiles.put(repoName, gradleFiles);
+                } else {
+                    logger.warn("No Gradle files found in repository: {}", repoName);
+                }
+            } else {
+                String githubApiUrl = "https://api.github.com/users/" + githubRepo.split("/")[3] + "/repos";
+                logger.info("Fetching repositories from: {}", githubApiUrl);
+
+                HttpRequest request = buildGitHubRequest(githubApiUrl);
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+                if (response.statusCode() != 200) {
+                    logger.error("Failed to fetch repositories - {}", response.body());
+                    return repoGradleFiles;
+                }
+
+                JsonNode jsonResponse = objectMapper.readTree(response.body());
+
+                for (JsonNode repoNode : jsonResponse) {
+                    String repoName = repoNode.get("name").asText();
+                    String repoOwner = githubRepo.split("/")[3];
+                    String branch = fetchDefaultBranch(repoOwner, repoName);
+
+                    Repository repo = new Repository(repoOwner, repoName, branch);
+                    List<String> gradleFiles = findGradleFilesRecursively(repo.getContentsUrl());
+
+                    if (!gradleFiles.isEmpty()) {
+                        repoGradleFiles.put(repoName, gradleFiles);
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            logger.error("Failed to fetch repositories - {}", e.getMessage());
         }
 
         return repoGradleFiles;
+    }
+    
+    private String fetchDefaultBranch(String owner, String repoName) {
+        try {
+            String apiUrl = "https://api.github.com/repos/" + owner + "/" + repoName;
+            HttpRequest request = buildGitHubRequest(apiUrl);
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() == 200) {
+                JsonNode jsonResponse = objectMapper.readTree(response.body());
+                return jsonResponse.get("default_branch").asText();
+            } else {
+                logger.warn("Failed to fetch default branch for {}/{}. Using 'main' as fallback.", owner, repoName);
+            }
+        } catch (Exception e) {
+            logger.error("Error fetching default branch for {}/{}: {}", owner, repoName, e.getMessage());
+        }
+        return "main"; // Default fallback branch
     }
 
     private boolean isSingleRepository(String githubRepo) {
