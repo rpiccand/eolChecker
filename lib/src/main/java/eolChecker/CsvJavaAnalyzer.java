@@ -1,6 +1,7 @@
 import java.io.*;
 import java.nio.file.*;
 import java.util.*;
+import java.util.regex.*;
 
 public class CsvJavaAnalyzer {
     private static final String CSV_FILE = "input.csv"; // Path to CSV file
@@ -29,13 +30,7 @@ public class CsvJavaAnalyzer {
 
                 if (javaFile.exists()) {
                     // Process the Java file
-                    List<String> contextLines = extractContextLines(javaFile, TARGET_STRING);
-
-                    // Write to output
-                    outputWriter.write("CSV Row: " + col1 + ", " + col2 + ", " + className + "\n");
-                    for (String context : contextLines) {
-                        outputWriter.write(context + "\n");
-                    }
+                    List<String> contextLines = extractContextLines(javaFile, TARGET_STRING, outputWriter, col1, col2, className);
                     outputWriter.write("\n----------------------------------\n");
                 } else {
                     outputWriter.write("Java file not found: " + javaFilePath + "\n");
@@ -50,14 +45,18 @@ public class CsvJavaAnalyzer {
     }
 
     /**
-     * Reads a Java file and extracts 2 lines before and 6 lines after each occurrence of a target string,
-     * ignoring commented-out lines.
+     * Reads a Java file and extracts:
+     * - 2 lines before and 6 lines after "ResponseType.Warning"
+     * - The content of the errorLog string from the same block
+     * - Ignores commented-out lines
      */
-    private static List<String> extractContextLines(File javaFile, String targetString) throws IOException {
+    private static List<String> extractContextLines(File javaFile, String targetString, BufferedWriter outputWriter, 
+                                                    String col1, String col2, String className) throws IOException {
         List<String> result = new ArrayList<>();
         List<String> lines = Files.readAllLines(javaFile.toPath());
 
         boolean insideBlockComment = false;
+        Stack<String> blockStack = new Stack<>();
 
         for (int i = 0; i < lines.size(); i++) {
             String line = lines.get(i).trim();
@@ -78,21 +77,60 @@ public class CsvJavaAnalyzer {
                 continue;
             }
 
+            // Track the opening and closing of code blocks {}
+            if (line.contains("{")) {
+                blockStack.push("{");
+            }
+            if (line.contains("}") && !blockStack.isEmpty()) {
+                blockStack.pop();
+            }
+
             // Search for the target string (ignoring comments)
             if (line.contains(targetString)) {
                 int start = Math.max(0, i - 2);  // 2 lines before
                 int end = Math.min(lines.size(), i + 7); // 6 lines after
+                List<String> blockLines = new ArrayList<>();
 
-                result.add(">>> Context from " + javaFile.getName() + " at line " + (i + 1) + ":");
+                outputWriter.write("CSV Row: " + col1 + ", " + col2 + ", " + className + "\n");
+                outputWriter.write(">>> Context from " + javaFile.getName() + " at line " + (i + 1) + ":\n");
+
                 for (int j = start; j < end; j++) {
                     String contextLine = lines.get(j).trim();
                     if (!contextLine.startsWith("//") && !contextLine.startsWith("/*")) { // Skip comments
-                        result.add((j + 1) + ": " + contextLine);
+                        blockLines.add(contextLine);
+                        outputWriter.write((j + 1) + ": " + contextLine + "\n");
                     }
                 }
-                result.add("");
+
+                // Find errorLog content in the same block
+                String errorLogContent = extractErrorLogContent(blockLines);
+                if (!errorLogContent.isEmpty()) {
+                    outputWriter.write(">>> Extracted errorLog Content: " + errorLogContent + "\n");
+                }
+
+                outputWriter.write("\n");
             }
         }
         return result;
+    }
+
+    /**
+     * Extracts the content of errorLog from a given block of code.
+     */
+    private static String extractErrorLogContent(List<String> blockLines) {
+        StringBuilder errorLogContent = new StringBuilder();
+        Pattern errorLogPattern = Pattern.compile("errorLog\\s*\\+?=\\s*\"([^\"]*)\"|errorLog\\.append\\(\"([^\"]*)\"\\)");
+
+        for (String line : blockLines) {
+            Matcher matcher = errorLogPattern.matcher(line);
+            while (matcher.find()) {
+                if (matcher.group(1) != null) {
+                    errorLogContent.append(matcher.group(1)).append(" ");
+                } else if (matcher.group(2) != null) {
+                    errorLogContent.append(matcher.group(2)).append(" ");
+                }
+            }
+        }
+        return errorLogContent.toString().trim();
     }
 }
