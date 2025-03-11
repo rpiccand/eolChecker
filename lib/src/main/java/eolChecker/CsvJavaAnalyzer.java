@@ -30,7 +30,7 @@ public class CsvJavaAnalyzer {
 
                 if (javaFile.exists()) {
                     // Process the Java file
-                    List<String> contextLines = extractContextLines(javaFile, TARGET_STRING, outputWriter, col1, col2, className);
+                    extractContextLines(javaFile, TARGET_STRING, outputWriter, col1, col2, className);
                     outputWriter.write("\n----------------------------------\n");
                 } else {
                     outputWriter.write("Java file not found: " + javaFilePath + "\n");
@@ -47,12 +47,11 @@ public class CsvJavaAnalyzer {
     /**
      * Reads a Java file and extracts:
      * - 2 lines before and 6 lines after "ResponseType.Warning"
-     * - The content of the errorLog string from the same block
+     * - The content of the errorLog string from the same block, including multi-line concatenations
      * - Ignores commented-out lines
      */
-    private static List<String> extractContextLines(File javaFile, String targetString, BufferedWriter outputWriter, 
-                                                    String col1, String col2, String className) throws IOException {
-        List<String> result = new ArrayList<>();
+    private static void extractContextLines(File javaFile, String targetString, BufferedWriter outputWriter, 
+                                            String col1, String col2, String className) throws IOException {
         List<String> lines = Files.readAllLines(javaFile.toPath());
 
         boolean insideBlockComment = false;
@@ -77,7 +76,7 @@ public class CsvJavaAnalyzer {
                 continue;
             }
 
-            // Track the opening and closing of code blocks {}
+            // Track code blocks {}
             if (line.contains("{")) {
                 blockStack.push("{");
             }
@@ -111,26 +110,47 @@ public class CsvJavaAnalyzer {
                 outputWriter.write("\n");
             }
         }
-        return result;
     }
 
     /**
-     * Extracts the content of errorLog from a given block of code.
+     * Extracts the full content of errorLog including:
+     * - Direct assignments: errorLog = "message";
+     * - Concatenations: errorLog += "part1" + "part2";
+     * - Append operations: errorLog.append("something");
      */
     private static String extractErrorLogContent(List<String> blockLines) {
         StringBuilder errorLogContent = new StringBuilder();
-        Pattern errorLogPattern = Pattern.compile("errorLog\\s*\\+?=\\s*\"([^\"]*)\"|errorLog\\.append\\(\"([^\"]*)\"\\)");
+        boolean capturing = false;
+
+        Pattern errorLogPattern = Pattern.compile(
+            "errorLog\\s*(?:=|\\+=)\\s*\"([^\"]*)\"|errorLog\\.append\\(\"([^\"]*)\"\\)"
+        );
 
         for (String line : blockLines) {
             Matcher matcher = errorLogPattern.matcher(line);
             while (matcher.find()) {
+                capturing = true; // Start capturing
                 if (matcher.group(1) != null) {
                     errorLogContent.append(matcher.group(1)).append(" ");
                 } else if (matcher.group(2) != null) {
                     errorLogContent.append(matcher.group(2)).append(" ");
                 }
             }
+
+            // Handle continued string concatenation with "+"
+            if (capturing && line.contains("+") && !line.contains(";")) {
+                int quoteIndex = line.indexOf("\"");
+                if (quoteIndex >= 0) {
+                    errorLogContent.append(line.substring(quoteIndex + 1).replace("\"", "").trim()).append(" ");
+                }
+            }
+
+            // Stop capturing at semicolon
+            if (line.endsWith(";")) {
+                capturing = false;
+            }
         }
+
         return errorLogContent.toString().trim();
     }
 }
