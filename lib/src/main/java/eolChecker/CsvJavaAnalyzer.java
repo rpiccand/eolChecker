@@ -47,7 +47,7 @@ public class CsvJavaAnalyzer {
     /**
      * Reads a Java file and extracts:
      * - 2 lines before and 6 lines after "ResponseType.Warning"
-     * - The content of the errorLog string from the same block, including multi-line concatenations
+     * - The content of the errorLog string from the same block, including multi-line concatenations and append calls
      * - Ignores commented-out lines
      */
     private static void extractContextLines(File javaFile, String targetString, BufferedWriter outputWriter, 
@@ -117,32 +117,32 @@ public class CsvJavaAnalyzer {
      * - Direct assignments: errorLog = "message";
      * - Concatenations: errorLog += "part1" + "part2";
      * - Append operations: errorLog.append("something");
+     * - Multi-line append calls.
+     * - Extracts both variables and strings inside append()
      */
     private static String extractErrorLogContent(List<String> blockLines) {
         StringBuilder errorLogContent = new StringBuilder();
         boolean capturing = false;
 
         Pattern errorLogPattern = Pattern.compile(
-            "errorLog\\s*(?:=|\\+=)\\s*\"([^\"]*)\"|errorLog\\.append\\(\"([^\"]*)\"\\)"
+            "errorLog\\s*(?:=|\\+=)\\s*(.*?);|errorLog\\.append\\((.*?)\\)"
         );
 
         for (String line : blockLines) {
             Matcher matcher = errorLogPattern.matcher(line);
             while (matcher.find()) {
                 capturing = true; // Start capturing
-                if (matcher.group(1) != null) {
-                    errorLogContent.append(matcher.group(1)).append(" ");
-                } else if (matcher.group(2) != null) {
-                    errorLogContent.append(matcher.group(2)).append(" ");
+
+                if (matcher.group(1) != null) { // Direct assignment or concatenation
+                    errorLogContent.append(cleanupConcatenation(matcher.group(1))).append(" ");
+                } else if (matcher.group(2) != null) { // Append calls
+                    errorLogContent.append(cleanupConcatenation(matcher.group(2))).append(" ");
                 }
             }
 
             // Handle continued string concatenation with "+"
             if (capturing && line.contains("+") && !line.contains(";")) {
-                int quoteIndex = line.indexOf("\"");
-                if (quoteIndex >= 0) {
-                    errorLogContent.append(line.substring(quoteIndex + 1).replace("\"", "").trim()).append(" ");
-                }
+                errorLogContent.append(cleanupConcatenation(line)).append(" ");
             }
 
             // Stop capturing at semicolon
@@ -152,5 +152,20 @@ public class CsvJavaAnalyzer {
         }
 
         return errorLogContent.toString().trim();
+    }
+
+    /**
+     * Cleans up concatenations inside append() and += assignments, ensuring all variables and strings are included.
+     */
+    private static String cleanupConcatenation(String content) {
+        if (content == null) return "";
+
+        // Remove enclosing quotes from string literals
+        content = content.replaceAll("^\"|\"$", "");
+
+        // Handle concatenation by removing + symbols and trimming spaces
+        content = content.replaceAll("\\s*\\+\\s*", " ");
+
+        return content.trim();
     }
 }
